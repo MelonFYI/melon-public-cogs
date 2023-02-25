@@ -1,4 +1,8 @@
-from .LolCog import LolCog
+from redbot.core.bot import Red
 
-def setup(bot):
-    bot.add_cog(LolCog(bot))
+from .lolcog import LolCog
+
+
+async def setup(bot: Red):
+    cog = LolCog(bot)
+    bot.add_cog(cog)

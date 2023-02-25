@@ -1,70 +1,74 @@
 import discord
-from discord.ext import commands
+from redbot.core import commands
 import requests
+
 
 class LolCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.base_url = "https://{region}.api.riotgames.com/lol/"
         self.api_key = None
-    
+
+    async def get_api_key(self):
+        if not self.api_key:
+            self.api_key = await self.bot.get_shared_api_tokens("lol_api")
+        return self.api_key.get("api_key")
+
     @commands.command()
-    async def set_api_key(self, ctx, key):
-        """Set the Riot API key."""
-        self.api_key = key
-        await ctx.send("API key set.")
-    
+    async def setlolapikey(self, ctx, api_key):
+        await self.bot.set_shared_api_tokens("lol_api", api_key=api_key)
+        await ctx.send("Riot API key set!")
+
     @commands.command()
-    async def last_matches(self, ctx, region, username):
-        """Display the last 6 matches for the given user."""
-        if self.api_key is None:
-            await ctx.send("API key not set. Please use the `set_api_key` command to set the API key.")
+    async def last6(self, ctx, username: str, region: str):
+        api_key = await self.get_api_key()
+        if api_key is None:
+            await ctx.send("Please set a Riot API key with the 'setlolapikey' command.")
             return
-        
-        # Get summoner ID
-        summoner_url = self.base_url.format(region=region) + f"summoner/v4/summoners/by-name/{username}"
-        headers = {"X-Riot-Token": self.api_key}
-        summoner_response = requests.get(summoner_url, headers=headers)
-        if summoner_response.status_code == 404:
-            await ctx.send("Summoner not found.")
-            return
-        elif summoner_response.status_code != 200:
-            await ctx.send("Error getting summoner information.")
-            return
-        summoner_id = summoner_response.json()["id"]
-        
-        # Get match list
-        match_list_url = self.base_url.format(region=region) + f"match/v4/matchlists/by-account/{summoner_id}?endIndex=6"
-        match_list_response = requests.get(match_list_url, headers=headers)
-        if match_list_response.status_code != 200:
-            await ctx.send("Error getting match list.")
-            return
-        match_list = match_list_response.json()["matches"]
-        
-        # Get match details
-        matches = []
-        for match in match_list:
-            match_url = self.base_url.format(region=region) + f"match/v4/matches/{match['gameId']}"
-            match_response = requests.get(match_url, headers=headers)
-            if match_response.status_code != 200:
-                await ctx.send("Error getting match information.")
-                return
-            match_data = match_response.json()
-            participant_id = None
-            for participant in match_data["participantIdentities"]:
-                if participant["player"]["summonerName"].lower() == username.lower():
-                    participant_id = participant["participantId"]
-                    break
-            if participant_id is None:
-                await ctx.send(f"Error finding participant ID for {username}.")
-                return
-            participant_data = next(p for p in match_data["participants"] if p["participantId"] == participant_id)
-            match_result = "win" if participant_data["stats"]["win"] else "loss"
-            match_kills = participant_data["stats"]["kills"]
-            match_deaths = participant_data["stats"]["deaths"]
-            match_assists = participant_data["stats"]["assists"]
-            matches.append(f"{match_result} ({match_kills}/{match_deaths}/{match_assists})")
-        
-        # Send match details to Discord
-        matches_text = "\n".join(matches)
-        await ctx.send(f"Last 6 matches for {username}:\n{matches_text}")
+        try:
+            r = requests.get(
+                f"https://{region}.api.riotgames.com/lol/summoner/v4/summoners/by-name/{username}?api_key={api_key}"
+            )
+            r.raise_for_status()
+            account_id = r.json()["accountId"]
+            r = requests.get(
+                f"https://{region}.api.riotgames.com/lol/match/v4/matchlists/by-account/{account_id}?api_key={api_key}"
+            )
+            r.raise_for_status()
+            matches = r.json()["matches"][:6]
+            embed = discord.Embed(
+                title=f"Last 6 matches for {username} on {region.upper()} server"
+            )
+            for match in matches:
+                r = requests.get(
+                    f"https://{region}.api.riotgames.com/lol/match/v4/matches/{match['gameId']}?api_key={api_key}"
+                )
+                r.raise_for_status()
+                match_data = r.json()
+                participants = match_data["participantIdentities"]
+                participant_id = next(
+                    participant["participantId"]
+                    for participant in participants
+                    if participant["player"]["accountId"] == account_id
+                )
+                participant_data = next(
+                    participant
+                    for participant in match_data["participants"]
+                    if participant["participantId"] == participant_id
+                )
+                champ_id = participant_data["championId"]
+                champ_name = requests.get(
+                    f"http://ddragon.leagueoflegends.com/cdn/11.5.1/data/en_US/champion.json"
+                ).json()["data"][str(champ_id)]["name"]
+                embed.add_field(
+                    name=f"**{champ_name}**\n{match['role'].title()} {match['lane'].title()}",
+                    value=f"Match ID: [{match['gameId']}](https://{region}.matchhistory.leagueoflegends.com/{region}/match/{match['gameId']})",
+                    inline=False,
+                )
+            await ctx.send(embed=embed)
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                await ctx.send("Could not find player or region.")
+            else:
+                await ctx.send("An error occurred.")
+        except KeyError:
+            await ctx.send("An error occurred.")
