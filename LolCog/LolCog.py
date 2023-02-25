@@ -1,66 +1,70 @@
 import discord
-from redbot.core import commands
-from riotwatcher import LolWatcher
+from discord.ext import commands
+import requests
 
 class LolCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.base_url = "https://{region}.api.riotgames.com/lol/"
         self.api_key = None
-        self.watcher = None
-
+    
     @commands.command()
-    async def setapikey(self, ctx, api_key: str):
-        self.api_key = api_key
-        self.watcher = LolWatcher(api_key)
+    async def set_api_key(self, ctx, key):
+        """Set the Riot API key."""
+        self.api_key = key
         await ctx.send("API key set.")
-
+    
     @commands.command()
-    async def lol(self, ctx, name: str):
+    async def last_matches(self, ctx, region, username):
+        """Display the last 6 matches for the given user."""
         if self.api_key is None:
-            await ctx.send("Please set the Riot API key using the `setapikey` command.")
+            await ctx.send("API key not set. Please use the `set_api_key` command to set the API key.")
             return
-
-        regions = ["na1", "euw1", "kr", "jp1", "eun1", "br1", "oc1", "tr1", "ru", "la1", "la2"]
-        region = None
-        while region is None:
-            await ctx.send("Please enter the region the player is on (e.g. na1, euw1):")
-            region_input = await self.bot.wait_for("message", check=lambda message: message.author == ctx.author)
-            if region_input.content.lower() in regions:
-                region = region_input.content.lower()
-            else:
-                await ctx.send("Invalid region. Please try again.")
-
-        summoner = self.watcher.summoner.by_name(region, name)
-        if summoner is None:
+        
+        # Get summoner ID
+        summoner_url = self.base_url.format(region=region) + f"summoner/v4/summoners/by-name/{username}"
+        headers = {"X-Riot-Token": self.api_key}
+        summoner_response = requests.get(summoner_url, headers=headers)
+        if summoner_response.status_code == 404:
             await ctx.send("Summoner not found.")
             return
-
-        matches = self.watcher.match.matchlist_by_account(region, summoner["accountId"], end_index=6)
-        if matches is None:
-            await ctx.send("No matches found.")
+        elif summoner_response.status_code != 200:
+            await ctx.send("Error getting summoner information.")
             return
-
-        for match in matches["matches"]:
-            match_info = self.watcher.match.by_id(region, match["gameId"])
+        summoner_id = summoner_response.json()["id"]
+        
+        # Get match list
+        match_list_url = self.base_url.format(region=region) + f"match/v4/matchlists/by-account/{summoner_id}?endIndex=6"
+        match_list_response = requests.get(match_list_url, headers=headers)
+        if match_list_response.status_code != 200:
+            await ctx.send("Error getting match list.")
+            return
+        match_list = match_list_response.json()["matches"]
+        
+        # Get match details
+        matches = []
+        for match in match_list:
+            match_url = self.base_url.format(region=region) + f"match/v4/matches/{match['gameId']}"
+            match_response = requests.get(match_url, headers=headers)
+            if match_response.status_code != 200:
+                await ctx.send("Error getting match information.")
+                return
+            match_data = match_response.json()
             participant_id = None
-            for participant in match_info["participantIdentities"]:
-                if participant["player"]["summonerName"].lower() == name.lower():
+            for participant in match_data["participantIdentities"]:
+                if participant["player"]["summonerName"].lower() == username.lower():
                     participant_id = participant["participantId"]
                     break
             if participant_id is None:
-                await ctx.send("Error: could not find participant ID.")
+                await ctx.send(f"Error finding participant ID for {username}.")
                 return
-            participant_stats = None
-            for participant in match_info["participants"]:
-                if participant["participantId"] == participant_id:
-                    participant_stats = participant["stats"]
-                    break
-            if participant_stats is None:
-                await ctx.send("Error: could not find participant stats.")
-                return
-            win = "Victory" if participant_stats["win"] else "Defeat"
-            champ = self.watcher.static_champ_list()["data"][str(match["champion"])]["name"]
-            await ctx.send(f"{win} as {champ} ({match['gameId']})")
-
-def setup(bot):
-    bot.add_cog(LolCog(bot))
+            participant_data = next(p for p in match_data["participants"] if p["participantId"] == participant_id)
+            match_result = "win" if participant_data["stats"]["win"] else "loss"
+            match_kills = participant_data["stats"]["kills"]
+            match_deaths = participant_data["stats"]["deaths"]
+            match_assists = participant_data["stats"]["assists"]
+            matches.append(f"{match_result} ({match_kills}/{match_deaths}/{match_assists})")
+        
+        # Send match details to Discord
+        matches_text = "\n".join(matches)
+        await ctx.send(f"Last 6 matches for {username}:\n{matches_text}")
